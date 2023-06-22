@@ -1,10 +1,14 @@
 package com.relustatescu.weatherapp.presentation
 
 import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.Context
+import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
@@ -20,7 +24,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.CircularProgressIndicator
-import androidx.compose.material.FloatingActionButton
 import androidx.compose.material.Icon
 import androidx.compose.material.IconButton
 import androidx.compose.material.Text
@@ -29,6 +32,8 @@ import androidx.compose.material.TextFieldDefaults
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -49,17 +54,31 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.Marker
+import com.relustatescu.weatherapp.domain.weather.WeatherNotificationService
 import com.relustatescu.weatherapp.presentation.ui.theme.DarkBlue
 import com.relustatescu.weatherapp.presentation.ui.theme.DeepBlue
 import com.relustatescu.weatherapp.presentation.ui.theme.Shapes
 import com.relustatescu.weatherapp.presentation.ui.theme.WeatherAppTheme
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.delay
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
     private val viewModel: WeatherViewModel by viewModels()
     private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
+    private fun createNotificationChannel() {
+        if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                WeatherNotificationService.WEATHER_CHANNEL_ID,
+                "Weather",
+                NotificationManager.IMPORTANCE_DEFAULT
+            )
+            channel.description = "Used for the weather share notification"
+            val notificationmanager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationmanager.createNotificationChannel(channel)
+        }
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         permissionLauncher = registerForActivityResult(
@@ -67,6 +86,7 @@ class MainActivity : ComponentActivity() {
         ) {
             viewModel.loadWeatherInfo()
         }
+        createNotificationChannel()
         permissionLauncher.launch(arrayOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION
@@ -80,6 +100,12 @@ class MainActivity : ComponentActivity() {
                 val focusRequester = remember { FocusRequester() }
                 val focusManager = LocalFocusManager.current
                 val navController = rememberNavController()
+                val notificationService = WeatherNotificationService(applicationContext)
+                LaunchedEffect(Unit) {
+                    delay(10000)
+                    notificationService.showNotification(viewModel.state.weatherInfo?.currentWeatherData!!, viewModel.state.locationInfo?.location!!)
+                }
+
                 NavHost(navController = navController, startDestination = Screen.MainScreen.route) {
                     composable(route = Screen.MainScreen.route) {
                         Box(
@@ -127,6 +153,25 @@ class MainActivity : ComponentActivity() {
                                                 )
                                             }
                                         }
+                                    },
+                                    trailingIcon = {
+                                        IconButton(
+                                            onClick = {
+                                                val intent = Intent().apply {
+                                                    action = Intent.ACTION_SEND
+                                                    putExtra(Intent.EXTRA_TEXT, "${viewModel.state.weatherInfo?.currentWeatherData?.temperatureC}°C in ${viewModel.state.locationInfo?.location} - MobileWeatherApp by Relu Stătescu")
+                                                    type = "text/plain"
+                                                }
+                                                val shareIntent = Intent.createChooser(intent, "Share via")
+                                                startActivity(shareIntent)
+                                            }
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Share,
+                                                contentDescription = "Share Weather",
+                                                tint = Color.White
+                                            )
+                                        }
                                     }
                                 )
                                 if(isSearching) {
@@ -147,7 +192,7 @@ class MainActivity : ComponentActivity() {
                                                     modifier = Modifier.fillMaxWidth()
                                                 ) {
                                                     Text(
-                                                        text = "${city.description}",
+                                                        text = city.description,
                                                         modifier = Modifier
                                                             .clickable {
                                                                 viewModel.loadWeatherOfSelected(
@@ -190,7 +235,7 @@ class MainActivity : ComponentActivity() {
                                                             Color.White,
                                                             shape = CircleShape
                                                         )
-                                                        .padding(4.dp)
+                                                        .padding(6.dp)
                                                 )
                                             }
                                         }
@@ -213,7 +258,6 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     composable(route = Screen.MapScreen.route){
-                        val markerFocused = remember { mutableStateOf(false) }
                         Box(modifier = Modifier.fillMaxSize()) {
                             GoogleMap(
                                 modifier = Modifier
