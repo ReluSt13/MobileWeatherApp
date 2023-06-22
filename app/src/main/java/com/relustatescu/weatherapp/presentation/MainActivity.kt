@@ -8,15 +8,19 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.fillMaxSize
@@ -40,32 +44,45 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import coil.compose.AsyncImage
+import com.google.android.gms.auth.api.identity.Identity
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.Marker
 import com.relustatescu.weatherapp.domain.weather.WeatherNotificationService
+import com.relustatescu.weatherapp.presentation.sign_in.GoogleAuthUiClient
+import com.relustatescu.weatherapp.presentation.sign_in.SignInScreen
+import com.relustatescu.weatherapp.presentation.sign_in.SignInViewModel
 import com.relustatescu.weatherapp.presentation.ui.theme.DarkBlue
 import com.relustatescu.weatherapp.presentation.ui.theme.DeepBlue
 import com.relustatescu.weatherapp.presentation.ui.theme.Shapes
 import com.relustatescu.weatherapp.presentation.ui.theme.WeatherAppTheme
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
-    private val viewModel: WeatherViewModel by viewModels()
+    private val weatherViewModel: WeatherViewModel by viewModels()
     private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
     private fun createNotificationChannel() {
         if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -79,23 +96,31 @@ class MainActivity : ComponentActivity() {
             notificationmanager.createNotificationChannel(channel)
         }
     }
+
+    private val googleAuthUiClient by lazy {
+        GoogleAuthUiClient(
+            context = applicationContext,
+            oneTapClient = Identity.getSignInClient(applicationContext)
+        )
+    }
+    
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         permissionLauncher = registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
         ) {
-            viewModel.loadWeatherInfo()
+            weatherViewModel.loadWeatherInfo()
         }
-        createNotificationChannel()
         permissionLauncher.launch(arrayOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION
         ))
+        createNotificationChannel()
         setContent {
             WeatherAppTheme {
-                val searchText by viewModel.searchText.collectAsState()
-                val cities by viewModel.cities.collectAsState()
-                val isSearching by viewModel.isSearching.collectAsState()
+                val searchText by weatherViewModel.searchText.collectAsState()
+                val cities by weatherViewModel.cities.collectAsState()
+                val isSearching by weatherViewModel.isSearching.collectAsState()
                 val isSearchFocused = remember { mutableStateOf(false) }
                 val focusRequester = remember { FocusRequester() }
                 val focusManager = LocalFocusManager.current
@@ -103,10 +128,60 @@ class MainActivity : ComponentActivity() {
                 val notificationService = WeatherNotificationService(applicationContext)
                 LaunchedEffect(Unit) {
                     delay(10000)
-                    notificationService.showNotification(viewModel.state.weatherInfo?.currentWeatherData!!, viewModel.state.locationInfo?.location!!)
+                    notificationService.showNotification(weatherViewModel.state.weatherInfo?.currentWeatherData!!, weatherViewModel.state.locationInfo?.location!!)
                 }
 
-                NavHost(navController = navController, startDestination = Screen.MainScreen.route) {
+                NavHost(navController = navController, startDestination = Screen.LoginScreen.route) {
+                    composable(route = Screen.LoginScreen.route) {
+                        val signInViewModel = viewModel<SignInViewModel>()
+                        val state by signInViewModel.state.collectAsStateWithLifecycle()
+
+                        LaunchedEffect(key1 = Unit) {
+                            if(googleAuthUiClient.getSignedInUser() != null) {
+                                navController.navigate(Screen.MainScreen.route)
+                            }
+                        }
+
+                        val launcher = rememberLauncherForActivityResult(
+                            contract = ActivityResultContracts.StartIntentSenderForResult(),
+                            onResult = { result ->
+                                if(result.resultCode == RESULT_OK) {
+                                    lifecycleScope.launch {
+                                        val signInResult = googleAuthUiClient.signInWithIntent(
+                                            intent = result.data ?: return@launch
+                                        )
+                                        signInViewModel.onSignInResult(signInResult)
+                                    }
+                                }
+                            }
+                        )
+
+                        LaunchedEffect(key1 = state.isSignInSuccessful) {
+                            if(state.isSignInSuccessful) {
+                                Toast.makeText(
+                                    applicationContext,
+                                    "Sign in successful",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                                navController.navigate(Screen.MainScreen.route)
+                                signInViewModel.resetState()
+                            }
+                        }
+
+                        SignInScreen(
+                            state = state,
+                            onSignInClick = {
+                                lifecycleScope.launch {
+                                    val signInIntentSender = googleAuthUiClient.signIn()
+                                    launcher.launch(
+                                        IntentSenderRequest.Builder(
+                                            signInIntentSender ?: return@launch
+                                        ).build()
+                                    )
+                                }
+                            }
+                        )
+                    }
                     composable(route = Screen.MainScreen.route) {
                         Box(
                             modifier = Modifier.fillMaxSize()
@@ -118,10 +193,10 @@ class MainActivity : ComponentActivity() {
                             ) {
                                 TextField(
                                     value = searchText,
-                                    onValueChange = viewModel::onSearchTextChange,
+                                    onValueChange = weatherViewModel::onSearchTextChange,
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(10.dp)
+                                        .padding(8.dp)
                                         .background(color = DeepBlue, shape = Shapes.medium)
                                         .focusRequester(focusRequester)
                                         .onFocusChanged { isSearchFocused.value = it.isFocused },
@@ -155,22 +230,53 @@ class MainActivity : ComponentActivity() {
                                         }
                                     },
                                     trailingIcon = {
-                                        IconButton(
-                                            onClick = {
-                                                val intent = Intent().apply {
-                                                    action = Intent.ACTION_SEND
-                                                    putExtra(Intent.EXTRA_TEXT, "${viewModel.state.weatherInfo?.currentWeatherData?.temperatureC}°C in ${viewModel.state.locationInfo?.location} - MobileWeatherApp by Relu Stătescu")
-                                                    type = "text/plain"
-                                                }
-                                                val shareIntent = Intent.createChooser(intent, "Share via")
-                                                startActivity(shareIntent)
-                                            }
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Icon(
-                                                imageVector = Icons.Default.Share,
-                                                contentDescription = "Share Weather",
-                                                tint = Color.White
-                                            )
+                                            IconButton(
+                                                onClick = {
+                                                    val intent = Intent().apply {
+                                                        action = Intent.ACTION_SEND
+                                                        putExtra(Intent.EXTRA_TEXT, "${googleAuthUiClient.getSignedInUser()?.username} wants you to know that: ${weatherViewModel.state.weatherInfo?.currentWeatherData?.temperatureC}°C in ${weatherViewModel.state.locationInfo?.location} - Probability of rain ${weatherViewModel.state.weatherInfo?.currentWeatherData?.precipitationProbability?.roundToInt()}% - MobileWeatherApp by Relu Stătescu")
+                                                        type = "text/plain"
+                                                    }
+                                                    val shareIntent = Intent.createChooser(intent, "Share via")
+                                                    startActivity(shareIntent)
+                                                }
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Share,
+                                                    contentDescription = "Share Weather",
+                                                    tint = Color.White
+                                                )
+                                            }
+                                            if(googleAuthUiClient.getSignedInUser()?.profilePictureUrl != null) {
+                                                AsyncImage(
+                                                    model = googleAuthUiClient.getSignedInUser()?.profilePictureUrl,
+                                                    contentDescription = "Profile picture",
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier
+                                                        .size(32.dp)
+                                                        .clip(CircleShape)
+                                                        .pointerInput(Unit) {
+                                                            detectTapGestures(
+                                                                onLongPress = {
+                                                                    lifecycleScope.launch {
+                                                                        googleAuthUiClient.signOut()
+                                                                        Toast.makeText(
+                                                                            applicationContext,
+                                                                            "Signed out",
+                                                                            Toast.LENGTH_LONG
+                                                                        ).show()
+
+                                                                        navController.navigate(Screen.LoginScreen.route)
+                                                                    }
+                                                                }
+                                                            )
+                                                        }
+                                                )
+                                            }
                                         }
                                     }
                                 )
@@ -181,7 +287,6 @@ class MainActivity : ComponentActivity() {
                                         )
                                     }
                                 } else {
-                                    Log.d("MAIN-BS", cities.toString())
                                     AnimatedVisibility(visible = isSearchFocused.value) {
                                         LazyColumn(
                                             modifier = Modifier
@@ -195,7 +300,7 @@ class MainActivity : ComponentActivity() {
                                                         text = city.description,
                                                         modifier = Modifier
                                                             .clickable {
-                                                                viewModel.loadWeatherOfSelected(
+                                                                weatherViewModel.loadWeatherOfSelected(
                                                                     city.place_id
                                                                 ); focusRequester.requestFocus(); focusManager.clearFocus()
                                                             }
@@ -211,9 +316,9 @@ class MainActivity : ComponentActivity() {
                                 }
                                 AnimatedVisibility(visible = !isSearchFocused.value) {
                                     Column(modifier = Modifier.fillMaxSize()) {
-                                        WeatherCard(state = viewModel.state, backgroundColor = DeepBlue)
+                                        WeatherCard(state = weatherViewModel.state, backgroundColor = DeepBlue)
                                         Spacer(modifier = Modifier.height(8.dp))
-                                        WeatherForecast(state = viewModel.state)
+                                        WeatherForecast(state = weatherViewModel.state)
                                         Spacer(modifier = Modifier.height(16.dp))
                                         Box(
                                             modifier = Modifier
@@ -228,7 +333,7 @@ class MainActivity : ComponentActivity() {
                                                     contentDescription = "Map Icon",
                                                     tint = Color.White,
                                                     modifier = Modifier
-                                                        .size(48.dp)
+                                                        .size(46.dp)
                                                         .background(DeepBlue, shape = CircleShape)
                                                         .border(
                                                             1.dp,
@@ -242,12 +347,12 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             }
-                            if(viewModel.state.isLoading) {
+                            if(weatherViewModel.state.isLoading) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.align(Alignment.Center)
                                 )
                             }
-                            viewModel.state.error?.let { error ->
+                            weatherViewModel.state.error?.let { error ->
                                 Text(
                                     text = error,
                                     color = Color.Red,
@@ -263,12 +368,12 @@ class MainActivity : ComponentActivity() {
                                 modifier = Modifier
                                     .fillMaxSize(),
                                 onMapClick = {
-                                    viewModel.getWeatherFromMap(it)
+                                    weatherViewModel.getWeatherFromMap(it)
                                 }
                             ) {
                                 Marker(
-                                    position = viewModel.state.coords!!,
-                                    title = "${viewModel.state.locationInfo?.location} (${viewModel.state.coords!!.latitude}, ${viewModel.state.coords!!.longitude})",
+                                    position = weatherViewModel.state.coords!!,
+                                    title = "${weatherViewModel.state.locationInfo?.location} (${weatherViewModel.state.coords!!.latitude}, ${weatherViewModel.state.coords!!.longitude})",
                                     onClick = {
                                         it.showInfoWindow()
                                         true
